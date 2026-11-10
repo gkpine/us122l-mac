@@ -1,9 +1,11 @@
 # Builds build/libus122l.dylib and build/us122l-test. Needs libusb
 # (brew install libusb) and the Xcode command line tools.
-LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null || echo -I/opt/homebrew/opt/libusb/include/libusb-1.0)
-LIBUSB_LIBS := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo -L/opt/homebrew/opt/libusb/lib -lusb-1.0)
+# libusb: pkg-config, else Homebrew (Apple Silicon or Intel)
+LIBUSB_PREFIX ?= $(shell brew --prefix libusb 2>/dev/null || ls -d /opt/homebrew/opt/libusb /usr/local/opt/libusb 2>/dev/null | head -1)
+LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null || echo -I$(LIBUSB_PREFIX)/include/libusb-1.0)
+LIBUSB_LIBS := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo -L$(LIBUSB_PREFIX)/lib -lusb-1.0)
 CFLAGS ?= -O2 -Wall -Wextra -std=c11
-CFLAGS += -Iinclude $(LIBUSB_CFLAGS)
+override CFLAGS += -Iinclude $(LIBUSB_CFLAGS)
 
 all: build/libus122l.dylib build/us122l-test build/us122l-probe
 

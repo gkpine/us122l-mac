@@ -9,13 +9,21 @@ it directly over USB and hands audio to your callback, PortAudio-style. It's
 what lets [VibeAmp](../VibeAmp) use the US-122L on a Mac.
 
 - 2 inputs, 2 outputs, 24-bit, at 44.1, 48, 88.2 or 96 kHz
+- Notices when the unit stops (unplugged, Mac asleep), so apps can reconnect
 - No kernel extension, no root, nothing installed system-wide
 - Real-time threads; tested clean with every CPU core saturated
 - C API (`include/us122l.h`) and a Python binding (`import us122l`)
 
-It does **not** make the US-122L show up in other Mac apps (GarageBand,
-Logic…). That would need a Core Audio plug-in on top of this. The unit's MIDI
-ports aren't supported yet either.
+Not supported (yet):
+
+- **Other Mac apps** (GarageBand, Logic…) don't see it; that would need a
+  Core Audio plug-in on top of this.
+- **MIDI** in/out.
+- **USB 1.1 (full speed)** connections, e.g. through some hubs or KVMs: it
+  says so; plug the unit straight into the Mac.
+- **More than one unit** at once (the first one found is used).
+- The **US-122MKII** is recognised (the Linux driver treats it the same) but
+  hasn't been tested. The US-144 is not supported.
 
 ## Install
 
@@ -50,6 +58,18 @@ with us122l.Stream(samplerate=48000, blocksize=128, callback=callback) as s:
     ...
 ```
 
+- `status` is a `CallbackFlags` (`.input_overflow`, `.output_underflow`)
+  and `time` has `inputBufferAdcTime` / `outputBufferDacTime` /
+  `currentTime`, as in sounddevice.
+- Raise `us122l.CallbackStop` (or sounddevice's) to stop. Any other
+  exception stops the stream too and is kept in `stream.error`. Either way,
+  `stream.active` turns False.
+- `stream.active` is also False when the unit is unplugged or stops sending
+  audio (`stream.stalled`, e.g. after the Mac slept). Stop it, and `start()`
+  again when `us122l.present()`.
+- While a stream runs, `sys.setswitchinterval` is lowered to 1 ms so the
+  audio thread gets the GIL in time.
+
 Only one program can use the unit at a time.
 
 ## How it works
@@ -77,7 +97,9 @@ On macOS:
   capture arrives up to ~8 ms late on a busy machine and the stream breaks up.
 - **Buffering.** Playback buffers one block plus a cushion of two transfers
   and 1 ms. If the unit ever runs dry, the cushion grows by 1 ms (up to
-  10 ms more). Excess beyond that is trimmed, so latency can't creep up.
+  10 ms more). After 10 s without trouble, it gives 1 ms back.
+- **Watchdog.** If no audio arrives for 0.5 s while USB still looks alive
+  (the Mac slept, the unit hung), the stream reports itself stopped.
 
 At 48 kHz the estimated round trip is about 16 ms with 64-frame blocks and
 about 18 ms with 128.
