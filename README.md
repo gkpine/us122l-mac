@@ -1,169 +1,138 @@
-# us122l-mac
+# TASCAM US-122L driver for Mac
 
-A userspace driver for the **TASCAM US-122L** USB audio interface on macOS
-(Apple Silicon and Intel), built on [libusb](https://libusb.info).
+TASCAM stopped making Mac drivers for the US-122L years ago, so on a modern
+Mac, including Apple Silicon (M1 and later), the interface isn't recognized.
 
-TASCAM never released a US-122L driver for current macOS, and the unit isn't
-USB-audio class compliant, so Core Audio doesn't see it. This library talks to
-it directly over USB and hands audio to your callback, PortAudio-style. It's
-what lets [VibeAmp](../VibeAmp) use the US-122L on a Mac.
+This free driver brings it back. Once it's installed, your US-122L shows up
+as a normal audio interface and MIDI interface in every app on your Mac, just
+like it did when it was new.
 
-- 2 inputs, 2 outputs, 24-bit, at 44.1, 48, 88.2 or 96 kHz
-- Notices when the unit stops (unplugged, Mac asleep), so apps can reconnect
-- No kernel extension, no root, nothing installed system-wide
-- Real-time threads; tested clean with every CPU core saturated
-- C API (`include/us122l.h`) and a Python binding (`import us122l`)
+## What works
 
-It comes in two parts:
+- **Recording** from both inputs (mic, line or guitar), as a stereo pair or
+  as two separate tracks
+- **Playback** through the line outputs and the headphone jack
+- **Any app** that uses your Mac's normal audio settings: GarageBand, Logic
+  Pro, Ableton Live, Reaper, Audacity, Zoom, Music, System Settings → Sound
+  and so on
+- **Sample rates** of 44.1, 48, 88.2 and 96 kHz, at 24-bit, chosen by your
+  app as usual
+- **MIDI In and MIDI Out**, so you can play a keyboard into your music app or
+  control a synth from it*
+- **Plug and unplug** any time. It picks up again after your Mac wakes from
+  sleep.
 
-- **The Core Audio and Core MIDI drivers**: make the US-122L an ordinary
-  audio device, and its MIDI IN/OUT ordinary MIDI ports, for every app
-  (GarageBand, Logic, Music, Zoom, Sound settings, Audio MIDI Setup…). See
-  [Core Audio driver](#core-audio-driver).
-- **The library** (C and Python): for programs that talk to the unit
-  directly, like VibeAmp did before the Core Audio driver.
+\* MIDI has been tested from the Mac to the unit and back over USB. It
+hasn't yet been tried with a keyboard or synth plugged into the MIDI sockets.
+If you try it, please share how it goes.
 
-Not supported (yet):
+## What doesn't work (yet)
 
-- **USB 1.1 (full speed)** connections, e.g. through some hubs or KVMs: it
-  says so; plug the unit straight into the Mac.
-- **More than one unit** at once (the first one found is used).
-- The **US-122MKII** is recognised (the Linux driver treats it the same) but
-  hasn't been tested. The US-144 is not supported.
+- **Your Mac's volume slider and volume keys** don't control the US-122L. Use
+  the knobs on the unit instead.
+- **More than one US-122L** connected at the same time.
+- **Some USB hubs and adapters.** If the unit isn't found, plug it straight
+  into your Mac.
+- **Other TASCAM models.** The US-122MKII will probably work but hasn't been
+  tested. The original US-122 (without the "L") and the US-144 aren't
+  supported.
+- **Intel Macs** should work but haven't been tested.
 
-## Core Audio driver
+It has been tested on a MacBook Air (M1) running macOS 26 Tahoe.
 
-```sh
-brew install libusb       # only needed to build
-make
-sudo coreaudio/install.sh       # restarts Core Audio: sound stops for a second
-```
+## What you need
 
-Then pick **TASCAM US-122L** in System Settings → Sound, or in any app. It
-offers 2 inputs and 2 outputs at 44.1, 48, 88.2 or 96 kHz, and a MIDI device
-of the same name with one MIDI input and one output. Remove it all with
-`sudo coreaudio/uninstall.sh`.
+- A Mac with **macOS 11 Big Sur or newer**
+- Your Mac's **admin password**
+- An **internet connection**: the first install downloads two free tools,
+  Apple's Command Line Tools and Homebrew
+- About **15 minutes** the first time
 
-How it fits together:
+## How to install
 
-- **`us122ld`**, a launchd daemon running as root, owns the unit over USB.
-  It's built with this library in raw mode, with libusb linked in. It
-  streams only while an app is using the device, plus 5 s, and restarts the
-  stream if the unit stops (sleep, replug).
-- **`US122L.driver`**, an AudioServerPlugIn, is loaded by macOS's audio
-  server. It shows the device while a unit is plugged in.
-- **`US122L-MIDI.plugin`**, a Core MIDI driver, is loaded by MIDIServer.
-  The MIDI device shows as offline when the unit is unplugged.
-- **MIDI on the wire:** 9-byte bulk packets. MIDI IN carries up to 8 bytes
-  padded with `0xFD`; MIDI OUT carries one byte, padded the same way (as in
-  Linux). The unit only passes MIDI while its audio streams: with audio off
-  it took 2 of 18 bytes and then stopped accepting. So the daemon also
-  streams while any app listens to the MIDI input (Core MIDI's
-  `EnableSource`), and for 10 s after anything is sent to MIDI OUT. Bytes
-  wait the ~30 ms it takes to start.
-- They share one block of memory, handed over by Mach (`coreaudio/shared.h`).
-  It holds a capture ring and a playback ring, both indexed by the unit's
-  frame count, and the unit's clock. The daemon fits that clock from packet
-  arrival times with a 0.5 Hz delay-locked loop, and the plug-in gives it to
-  Core Audio as zero time stamps. Nothing is sent per I/O cycle.
-- Latency: Core Audio's usual buffer, plus a safety offset of one USB
-  transfer and 2 ms each way, plus 2 ms in and 6 ms out on the bus.
+1. **Download the driver.** At the top of this page, click the green
+   **Code** button, then **Download ZIP**.
+2. **Unzip it.** Open your **Downloads** folder and double-click the ZIP
+   file. You get a folder called **us122l-mac-main**.
+3. **Plug in your US-122L** with its USB cable.
+4. **Open Terminal.** Press **⌘ Space**, type **Terminal** and press
+   **Return**.
+5. **Go to the driver's folder.** Copy this line into Terminal and press
+   **Return**:
 
-Logs: `/Library/Logs/us122ld.log`. Test tools (run them outside any sandbox):
+   ```
+   cd ~/Downloads/us122l-mac-main
+   ```
 
-- `build/us122l-shmtest` acts like the audio plug-in, to check the daemon
-  without Core Audio.
-- `build/us122l-miditest` acts like a MIDI app. It turns on the daemon's
-  loopback switch (MIDI OUT echoed back as MIDI IN, after the unit accepted
-  it over USB) and checks every byte comes back. Measured: 120/120 bytes,
-  worst round trip 2.5 ms.
-- `build/us122l-midi` (with the daemon idle) prints what reaches the unit's
-  MIDI IN and sends a note to MIDI OUT every 2 s. Use it with a keyboard or
-  synth attached; the MIDI sockets themselves haven't been tested with gear
-  yet.
+6. **Run the installer.** Copy this line into Terminal and press **Return**:
 
-## Install the library
+   ```
+   sh install.sh
+   ```
 
-```sh
-brew install libusb
-pip install /path/to/us122l-mac        # into the Python you'll use it from
-```
+   The installer checks what your Mac needs and walks you through it:
 
-For VibeAmp, `run-mac.command` installs it on its own when this folder sits
-next to the VibeAmp folder.
+   - **If a window asks to install the Command Line Tools**, click
+     **Install** and wait for it to finish. Then run `sh install.sh` again.
+   - **If it says Homebrew is needed**, go to [brew.sh](https://brew.sh),
+     copy the install line shown there into Terminal and follow the steps.
+     Homebrew prints a few "Next steps" lines at the end: run those as well.
+     Then run `sh install.sh` again.
+   - **When it asks for your password**, type your Mac password and press
+     **Return**. Nothing shows on screen while you type; that's normal.
 
-Plain C (library and test tools in `build/`): `make`
+7. **You're done** when Terminal says **Installed.** Your Mac's sound cuts
+   out for a second while the driver loads.
 
-## Check the unit
+## How to use it
 
-```sh
-python -m us122l              # 5 s at 48 kHz: input levels, dropouts
-python -m us122l 10 48000 128 --thru    # inputs to outputs (headphones on, volume down!)
-./build/us122l-test 10 48000 128 tone   # C version; tone = 440 Hz at -20 dBFS
-```
+- **For the whole Mac:** open **System Settings → Sound** and choose
+  **TASCAM US-122L** under Output and Input.
+- **In GarageBand:** go to **GarageBand → Settings → Audio/MIDI** and choose
+  **TASCAM US-122L** as the Output Device and Input Device.
+- **In Logic Pro:** go to **Logic Pro → Settings → Audio → Devices**.
+- **In other apps:** look for the audio device setting in the app's settings.
+- **For MIDI:** your keyboard or synth appears as **TASCAM US-122L** in your
+  music app's MIDI settings, and in **Audio MIDI Setup** (in Applications →
+  Utilities).
 
-## Python
+## If something goes wrong
 
-```python
-import us122l
+- **TASCAM US-122L isn't in the list:**
+  - Check the unit is plugged straight into your Mac and its USB light is on.
+  - Unplug it, plug it back in and wait a few seconds.
+  - If it's still missing, restart your Mac.
+- **Crackles or dropouts:** raise the buffer size (sometimes called I/O
+  buffer) in your app's audio settings.
+- **It stopped working after a macOS update:** run `sh install.sh` again from
+  the driver's folder.
+- **Reporting a problem:** please include the file `/Library/Logs/us122ld.log`.
+  To open it, press **⌘ Shift G** in Finder and paste that path.
 
-def callback(indata, outdata, frames, time, status):   # same as sounddevice's
-    outdata[:] = indata          # (frames, 2) float32 arrays
+## Updating or removing it
 
-with us122l.Stream(samplerate=48000, blocksize=128, callback=callback) as s:
-    print(s.latency)             # (input, output) seconds, estimated
-    ...
-```
+- **To update:** download the latest ZIP as in steps 1–2, then run
+  `sh install.sh` from the new folder.
+- **To remove:** go to the driver's folder in Terminal (step 5) and run
+  `sh uninstall.sh`.
 
-- `status` is a `CallbackFlags` (`.input_overflow`, `.output_underflow`)
-  and `time` has `inputBufferAdcTime` / `outputBufferDacTime` /
-  `currentTime`, as in sounddevice.
-- Raise `us122l.CallbackStop` (or sounddevice's) to stop. Any other
-  exception stops the stream too and is kept in `stream.error`. Either way,
-  `stream.active` turns False.
-- `stream.active` is also False when the unit is unplugged or stops sending
-  audio (`stream.stalled`, e.g. after the Mac slept). Stop it, and `start()`
-  again when `us122l.present()`.
-- While a stream runs, `sys.setswitchinterval` is lowered to 1 ms so the
-  audio thread gets the GIL in time.
+## Is it safe?
 
-Only one program can use the unit at a time.
+- The driver is built on your own Mac from the source code in this
+  repository, which anyone can read.
+- It doesn't change your Mac's security settings, and it doesn't need a
+  kernel extension.
+- It installs three small pieces:
+  - a background helper that talks to the US-122L over USB
+  - an audio plug-in that shows the unit to your apps
+  - a MIDI plug-in that does the same for MIDI
+- `sh uninstall.sh` removes all three.
 
-## How it works
+## For developers
 
-The protocol comes from the Linux `snd-usb-us122l` driver (Karsten Wiese,
-GPL-2.0-or-later):
+How it works, how to build the parts by hand, and a C and Python library for
+talking to the unit directly: see [docs/TECHNICAL.md](docs/TECHNICAL.md).
 
-- USB 2.0 high speed, vendor-specific. Interface 1, alt setting 1: iso IN
-  endpoint `0x81` (capture) and iso OUT `0x02` (playback), one packet per
-  125 µs microframe, frames of 6 bytes (2 × 24-bit little-endian).
-- Vendor request `'I'` with `0x11` then `0x10` wakes it. The rate is a UAC1
-  `SET_CUR` (sampling frequency) on endpoint `0x81`.
-- The unit's clock is the master. Playback packets must mirror the sizes of
-  the capture packets (implicit feedback), otherwise playback drifts.
-
-On macOS:
-
-- **Transfers of 16 packets (2 ms).** 1 ms transfers lose about 40% of the
-  audio, because macOS can't keep them scheduled back to back. Four capture
-  transfers and three playback transfers stay queued; two playback transfers
-  starve.
-- **Real-time completions.** libusb's macOS backend delivers completions from
-  its own thread. The driver gives that thread (and its own two) Mach
-  time-constraint priority, like Core Audio's I/O threads. Without that,
-  capture arrives up to ~8 ms late on a busy machine and the stream breaks up.
-- **Buffering.** Playback buffers one block plus a cushion of two transfers
-  and 1 ms. If the unit ever runs dry, the cushion grows by 1 ms (up to
-  10 ms more). After 10 s without trouble, it gives 1 ms back.
-- **Watchdog.** If no audio arrives for 0.5 s while USB still looks alive
-  (the Mac slept, the unit hung), the stream reports itself stopped.
-
-At 48 kHz the estimated round trip is about 16 ms with 64-frame blocks and
-about 18 ms with 128.
-
-Debugging: `US122L_DEBUG=1` logs USB errors and underruns to stderr.
-`US122L_PKTS` and `US122L_XFERS` override the transfer size and queue depth.
-
-## License
-
-GPL-2.0-or-later (it follows the Linux driver's design). See `LICENSE`.
+Free software under the GPL-2.0-or-later licence (see [LICENSE](LICENSE)).
+The USB protocol comes from the Linux driver by Karsten Wiese. This project is
+not affiliated with or supported by TASCAM.
