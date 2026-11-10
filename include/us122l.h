@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-#define US122L_VERSION "0.2.0"
+#define US122L_VERSION "0.3.0"
 
 typedef struct us122l us122l_t;
 
@@ -61,6 +61,28 @@ int us122l_present(void);
  * writes a message to err (if not NULL). */
 us122l_t *us122l_open(unsigned rate, unsigned blocksize, us122l_callback cb,
                       void *user, char *err, size_t errlen);
+
+/* Low-level mode, for bridges (e.g. a Core Audio driver) that keep their own
+ * buffers and clock. Both callbacks run on the driver's real-time USB thread,
+ * every ~2 ms; they must be quick and never block.
+ *   capture: frames just received. first_frame counts capture frames since
+ *     the stream started (lost packets are filled with silence, so it tracks
+ *     the unit's clock); host_time is mach_absolute_time() at arrival.
+ *   playback: fill `frames` frames to send now; first_frame counts playback
+ *     frames since the stream started. The unit's clock decides how many.
+ * Both are interleaved stereo float32. */
+typedef struct {
+    void (*capture)(const float *in, unsigned frames, uint64_t first_frame,
+                    uint64_t host_time, void *user);
+    void (*playback)(float *out, unsigned frames, uint64_t first_frame, void *user);
+} us122l_raw_callbacks;
+
+us122l_t *us122l_open_raw(unsigned rate, const us122l_raw_callbacks *cbs, void *user,
+                          char *err, size_t errlen);
+
+/* Estimated latency of the USB path itself, in frames: how old capture data
+ * is when it arrives, and how far ahead playback data is queued. */
+void us122l_raw_latency(us122l_t *dev, unsigned *input, unsigned *output);
 
 /* Stop streaming and release the unit. Safe to call from inside the
  * callback (the rest of the close then happens on another thread). Don't

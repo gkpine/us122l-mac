@@ -7,7 +7,7 @@ LIBUSB_LIBS := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo -L$(LIBU
 CFLAGS ?= -O2 -Wall -Wextra -std=c11
 override CFLAGS += -Iinclude $(LIBUSB_CFLAGS)
 
-all: build/libus122l.dylib build/us122l-test build/us122l-probe
+all: build/libus122l.dylib build/us122l-test build/us122l-probe coreaudio
 
 build:
 	mkdir -p build
@@ -25,3 +25,25 @@ clean:
 	rm -rf build
 
 .PHONY: all clean
+
+# The Core Audio driver: the us122ld daemon (libusb linked in, so it doesn't
+# depend on Homebrew at run time) and the US122L.driver plug-in bundle.
+# Install with: sudo coreaudio/install.sh
+coreaudio: build/us122ld build/US122L.driver build/us122l-shmtest
+
+build/us122ld: coreaudio/daemon.c coreaudio/shared.h src/us122l.c include/us122l.h | build
+	$(CC) $(CFLAGS) coreaudio/daemon.c src/us122l.c $(LIBUSB_PREFIX)/lib/libusb-1.0.a \
+		-framework IOKit -framework CoreFoundation -framework Security -lobjc -o $@
+	codesign -f -s - $@
+
+build/US122L.driver: coreaudio/plugin.c coreaudio/client.h coreaudio/shared.h coreaudio/Info.plist | build
+	rm -rf $@ && mkdir -p $@/Contents/MacOS
+	cp coreaudio/Info.plist $@/Contents/
+	$(CC) $(CFLAGS) -arch arm64 -arch x86_64 -bundle coreaudio/plugin.c \
+		-framework CoreAudio -framework CoreFoundation -o $@/Contents/MacOS/US122L
+	codesign -f -s - $@
+
+build/us122l-shmtest: coreaudio/shmtest.c coreaudio/client.h coreaudio/shared.h | build
+	$(CC) $(CFLAGS) coreaudio/shmtest.c -o $@
+
+.PHONY: coreaudio

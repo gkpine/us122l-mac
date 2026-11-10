@@ -14,10 +14,16 @@ what lets [VibeAmp](../VibeAmp) use the US-122L on a Mac.
 - Real-time threads; tested clean with every CPU core saturated
 - C API (`include/us122l.h`) and a Python binding (`import us122l`)
 
+It comes in two parts:
+
+- **The Core Audio driver**: makes the US-122L an ordinary audio device for
+  every app (GarageBand, Logic, Music, Zoom, Sound settings…). See
+  [Core Audio driver](#core-audio-driver).
+- **The library** (C and Python): for programs that talk to the unit
+  directly, like VibeAmp did before the Core Audio driver.
+
 Not supported (yet):
 
-- **Other Mac apps** (GarageBand, Logic…) don't see it; that would need a
-  Core Audio plug-in on top of this.
 - **MIDI** in/out.
 - **USB 1.1 (full speed)** connections, e.g. through some hubs or KVMs: it
   says so; plug the unit straight into the Mac.
@@ -25,7 +31,38 @@ Not supported (yet):
 - The **US-122MKII** is recognised (the Linux driver treats it the same) but
   hasn't been tested. The US-144 is not supported.
 
-## Install
+## Core Audio driver
+
+```sh
+brew install libusb       # only needed to build
+make
+sudo coreaudio/install.sh       # restarts Core Audio: sound stops for a second
+```
+
+Then pick **TASCAM US-122L** in System Settings → Sound, or in any app. It
+offers 2 inputs and 2 outputs at 44.1, 48, 88.2 or 96 kHz. Remove it with
+`sudo coreaudio/uninstall.sh`.
+
+How it fits together:
+
+- **`us122ld`**, a launchd daemon running as root, owns the unit over USB.
+  It's built with this library in raw mode, with libusb linked in. It
+  streams only while an app is using the device, plus 5 s, and restarts the
+  stream if the unit stops (sleep, replug).
+- **`US122L.driver`**, an AudioServerPlugIn, is loaded by macOS's audio
+  server. It shows the device while a unit is plugged in.
+- They share one block of memory, handed over by Mach (`coreaudio/shared.h`).
+  It holds a capture ring and a playback ring, both indexed by the unit's
+  frame count, and the unit's clock. The daemon fits that clock from packet
+  arrival times with a 0.5 Hz delay-locked loop, and the plug-in gives it to
+  Core Audio as zero time stamps. Nothing is sent per I/O cycle.
+- Latency: Core Audio's usual buffer, plus a safety offset of one USB
+  transfer and 2 ms each way, plus 2 ms in and 6 ms out on the bus.
+
+Logs: `/Library/Logs/us122ld.log`. `build/us122l-shmtest` acts like the
+plug-in, to check the daemon without Core Audio (run it outside any sandbox).
+
+## Install the library
 
 ```sh
 brew install libusb

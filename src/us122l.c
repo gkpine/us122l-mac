@@ -167,6 +167,10 @@ struct us122l {
     unsigned rate, block;
     us122l_callback cb;
     void *user;
+    int raw;                    /* low-level mode (us122l_open_raw) */
+    us122l_raw_callbacks rcb;
+    float *rawbuf;              /* one transfer of frames, for raw mode */
+    uint64_t raw_out_frame;     /* playback frames handed out (raw mode) */
 
     int npkt, nin, nout;
     struct libusb_transfer *in[NXFER_MAX], *out[NXFER_MAX];
@@ -279,6 +283,35 @@ static void fill_out(struct us122l *d, struct libusb_transfer *t)
 
     while (d->fb_w - d->fb_r > FB_MAX)
         d->fb_r++;
+    if (d->raw) {
+        unsigned sizes[NPKT_MAX], total = 0;
+        for (int i = 0; i < d->npkt; i++) {
+            unsigned n;
+            if (d->fb_w != d->fb_r) {
+                n = d->fb[d->fb_r++ & (FB_CAP - 1)];
+            } else {
+                d->phase += d->freqn;
+                n = d->phase >> 16;
+                d->phase &= 0xffff;
+            }
+            sizes[i] = n > MAX_FRAMES_PKT ? MAX_FRAMES_PKT : n;
+            total += sizes[i];
+        }
+        if (total)
+            d->rcb.playback(d->rawbuf, total, d->raw_out_frame, d->user);
+        d->raw_out_frame += total;
+        const float *src = d->rawbuf;
+        for (int i = 0; i < d->npkt; i++) {
+            for (unsigned f = 0; f < sizes[i]; f++, src += 2, p += FRAME) {
+                float_to_s24(src[0], p);
+                float_to_s24(src[1], p + 3);
+            }
+            t->iso_packet_desc[i].length = sizes[i] * FRAME;
+        }
+        t->length = (int)(p - t->buffer);
+        atomic_fetch_add(&d->frames_out, total);
+        return;
+    }
     if (primed) {
         /* After a stall the ring can hold more than it should: drop the
          * excess so latency doesn't creep up. */
@@ -364,7 +397,43 @@ static void LIBUSB_CALL in_done(struct libusb_transfer *t)
 {
     struct us122l *d = t->user_data;
     check_status(d, t);
-    if (t->status == LIBUSB_TRANSFER_COMPLETED) {
+    if (t->status == LIBUSB_TRANSFER_COMPLETED && d->raw) {
+        uint64_t host = mach_absolute_time();
+        uint64_t first = atomic_load(&d->frames_in);
+        unsigned total = 0;
+        float *dst = d->rawbuf;
+        for (int i = 0; i < t->num_iso_packets; i++) {
+            struct libusb_iso_packet_descriptor *pd = &t->iso_packet_desc[i];
+            unsigned n;
+            if (pd->status == LIBUSB_TRANSFER_COMPLETED) {
+                n = pd->actual_length / FRAME;
+                const uint8_t *src = libusb_get_iso_packet_buffer_simple(t, (unsigned)i);
+                for (unsigned f = 0; f < n; f++, src += FRAME, dst += 2) {
+                    dst[0] = s24_to_float(src);
+                    dst[1] = s24_to_float(src + 3);
+                }
+            } else {
+                /* lost: silence of the nominal size keeps the frame count
+                 * in step with the unit's clock */
+                atomic_fetch_add(&d->usb_errors, 1);
+                d->in_phase += d->freqn;
+                n = d->in_phase >> 16;
+                d->in_phase &= 0xffff;
+                if (n > MAX_FRAMES_PKT)
+                    n = MAX_FRAMES_PKT;
+                memset(dst, 0, n * 2 * sizeof(float));
+                dst += 2 * n;
+            }
+            total += n;
+            if (n && d->fb_w - d->fb_r < FB_CAP)
+                d->fb[d->fb_w++ & (FB_CAP - 1)] = (uint8_t)n;
+        }
+        if (total) {
+            d->rcb.capture(d->rawbuf, total, first, host, d->user);
+            atomic_fetch_add(&d->frames_in, total);
+            atomic_store(&d->last_data_ns, now_ns());
+        }
+    } else if (t->status == LIBUSB_TRANSFER_COMPLETED) {
         int got = 0;
         for (int i = 0; i < t->num_iso_packets; i++) {
             struct libusb_iso_packet_descriptor *pd = &t->iso_packet_desc[i];
@@ -565,6 +634,7 @@ static void release(struct us122l *d)
     free(d->play.buf);
     free(d->inbuf);
     free(d->outbuf);
+    free(d->rawbuf);
     free(d);
 }
 
@@ -614,8 +684,40 @@ void us122l_close(us122l_t *d)
     release(d);
 }
 
+static us122l_t *open_common(unsigned rate, unsigned block, us122l_callback cb,
+                             const us122l_raw_callbacks *raw, void *user,
+                             char *err, size_t errlen);
+
 us122l_t *us122l_open(unsigned rate, unsigned block, us122l_callback cb, void *user,
                       char *err, size_t errlen)
+{
+    if (!cb) {
+        seterr(err, errlen, "no callback given%s", NULL);
+        return NULL;
+    }
+    return open_common(rate, block, cb, NULL, user, err, errlen);
+}
+
+us122l_t *us122l_open_raw(unsigned rate, const us122l_raw_callbacks *cbs, void *user,
+                          char *err, size_t errlen)
+{
+    if (!cbs || !cbs->capture || !cbs->playback) {
+        seterr(err, errlen, "no callbacks given%s", NULL);
+        return NULL;
+    }
+    return open_common(rate, 256, NULL, cbs, user, err, errlen);
+}
+
+void us122l_raw_latency(us122l_t *d, unsigned *input, unsigned *output)
+{
+    unsigned t = d->rate * d->npkt / 8000;     /* one transfer */
+    *input = t;
+    *output = d->nout * t;
+}
+
+static us122l_t *open_common(unsigned rate, unsigned block, us122l_callback cb,
+                             const us122l_raw_callbacks *raw, void *user,
+                             char *err, size_t errlen)
 {
     if (rate != 44100 && rate != 48000 && rate != 88200 && rate != 96000) {
         seterr(err, errlen, "unsupported sample rate (use 44100, 48000, 88200 or 96000)%s", NULL);
@@ -623,10 +725,6 @@ us122l_t *us122l_open(unsigned rate, unsigned block, us122l_callback cb, void *u
     }
     if (block < 16 || block > 4096) {
         seterr(err, errlen, "block size must be 16 to 4096 frames%s", NULL);
-        return NULL;
-    }
-    if (!cb) {
-        seterr(err, errlen, "no callback given%s", NULL);
         return NULL;
     }
     struct us122l *d = calloc(1, sizeof(*d));
@@ -650,6 +748,10 @@ us122l_t *us122l_open(unsigned rate, unsigned block, us122l_callback cb, void *u
     d->block = block;
     d->cb = cb;
     d->user = user;
+    if (raw) {
+        d->raw = 1;
+        d->rcb = *raw;
+    }
     d->freqn = ((rate << 10) + 62) / 125;    /* frames per microframe, Q16.16 */
     /* Playback buffering beyond one block. A capture transfer can land and
      * the next playback transfer get built before the audio thread has run,
@@ -658,7 +760,8 @@ us122l_t *us122l_open(unsigned rate, unsigned block, us122l_callback cb, void *u
     atomic_init(&d->cushion, d->base_cushion);
     d->inbuf = calloc((size_t)block * 2, sizeof(float));
     d->outbuf = calloc((size_t)block * 2, sizeof(float));
-    if (ring_init(&d->cap) || ring_init(&d->play) || !d->inbuf || !d->outbuf) {
+    d->rawbuf = calloc((size_t)NPKT_MAX * MAX_FRAMES_PKT * 2, sizeof(float));
+    if (ring_init(&d->cap) || ring_init(&d->play) || !d->inbuf || !d->outbuf || !d->rawbuf) {
         seterr(err, errlen, "out of memory%s", NULL);
         release(d);
         return NULL;
@@ -774,7 +877,7 @@ us122l_t *us122l_open(unsigned rate, unsigned block, us122l_callback cb, void *u
         us122l_close(d);
         return NULL;
     }
-    if (pthread_create(&d->proc_thread, NULL, proc_main, d) == 0)
+    if (!d->raw && pthread_create(&d->proc_thread, NULL, proc_main, d) == 0)
         d->proc_started = 1;
 
     /* the unit should start sending audio within a few ms */
