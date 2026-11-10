@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleExecutable</key><string>US122LMIDI</string>
+	<key>CFBundleIdentifier</key><string>org.us122l-mac.midi</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>TASCAM US-122L MIDI</string>
+	<key>CFBundlePackageType</key><string>BNDL</string>
+	<key>CFBundleShortVersionString</key><string>0.4.0</string>
+	<key>CFBundleVersion</key><string>0.4.0</string>
+	<key>CFPlugInDynamicRegistration</key><string>NO</string>
+	<key>CFPlugInFactories</key>
+	<dict>
+		<key>3B8F6E21-5C4D-4A7B-9E12-6D0C8F2A4B91</key><string>US122LMIDI_Create</string>
+	</dict>
+	<key>CFPlugInTypes</key>
+	<dict>
+		<key>ECDE9574-0FE4-11D4-BB1A-0050E4CEA526</key>
+		<array><string>3B8F6E21-5C4D-4A7B-9E12-6D0C8F2A4B91</string></array>
+	</dict>
+</dict>
+</plist>

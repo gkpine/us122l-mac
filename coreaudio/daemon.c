@@ -34,6 +34,13 @@
 #define RETRY_S 2.0           /* after a failed start */
 
 static us122l_shm_t *S;
+static pthread_mutex_t dev_mx = PTHREAD_MUTEX_INITIALIZER;   /* guards `dev` */
+static us122l_t *dev;
+/* The unit only passes MIDI while audio streams, so MIDI use keeps the
+ * stream running too: while an app listens to MIDI IN, and for a while after
+ * anything is sent to MIDI OUT. */
+#define MIDI_OUT_LINGER_S 10.0
+static _Atomic uint64_t last_midi_out;     /* mach time MIDI OUT bytes were waiting */
 static mach_port_t mem_entry;
 static mach_vm_size_t shm_size;
 static double ticks_per_sec;
@@ -135,6 +142,51 @@ static void on_playback(float *out, unsigned n, uint64_t first, void *u)
     atomic_store_explicit(&S->out_read, st.out_pos, memory_order_release);
 }
 
+static void on_midi_in(const uint8_t *data, unsigned len, uint64_t host, void *u)
+{
+    (void)u;
+    uint32_t w = atomic_load_explicit(&S->midi_in_w, memory_order_relaxed);
+    if (w - atomic_load_explicit(&S->midi_in_r, memory_order_acquire) >= US122L_MIDI_EVENTS)
+        return;                                 /* nobody's reading: drop */
+    us122l_midi_event_t *e = &S->midi_in[w & (US122L_MIDI_EVENTS - 1)];
+    e->host = host;
+    e->len = len > 8 ? 8 : len;
+    memcpy(e->data, data, e->len);
+    atomic_store_explicit(&S->midi_in_w, w + 1, memory_order_release);
+}
+
+/* Moves bytes from the MIDI OUT ring to the unit, every 1 ms. Bytes wait
+ * while the stream starts; they're dropped if no unit is plugged in. */
+static void *midi_pump(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint32_t r = atomic_load_explicit(&S->midi_out_r, memory_order_relaxed);
+        uint32_t w = atomic_load_explicit(&S->midi_out_w, memory_order_acquire);
+        if (w != r) {
+            atomic_store(&last_midi_out, mach_absolute_time());
+            uint8_t buf[256];
+            unsigned n = 0, sent = 0;
+            while (r + n != w && n < sizeof buf) {
+                buf[n] = S->midi_out[(r + n) & (US122L_MIDI_OUT - 1)];
+                n++;
+            }
+            pthread_mutex_lock(&dev_mx);
+            if (dev)
+                sent = us122l_midi_send(dev, buf, n);
+            else if (!atomic_load(&S->present))
+                sent = n;                       /* nowhere to send it: drop */
+            pthread_mutex_unlock(&dev_mx);
+            if (sent && atomic_load(&S->midi_loopback))
+                for (unsigned i = 0; i < sent; i += 8)
+                    on_midi_in(buf + i, sent - i < 8 ? sent - i : 8, mach_absolute_time(), NULL);
+            atomic_store_explicit(&S->midi_out_r, r + sent, memory_order_release);
+        }
+        usleep(1000);
+    }
+    return NULL;
+}
+
 /* ---------------------------------------------------------- Mach server */
 
 static void *serve(void *arg)
@@ -224,7 +276,7 @@ static us122l_t *start_stream(unsigned rate)
     st.nominal_tpf = ticks_per_sec / rate;
     atomic_fetch_add(&S->seed, 1);
 
-    static const us122l_raw_callbacks cbs = {on_capture, on_playback};
+    static const us122l_raw_callbacks cbs = {on_capture, on_playback, on_midi_in};
     char err[256] = "";
     us122l_t *dev = us122l_open_raw(rate, &cbs, NULL, err, sizeof err);
     if (!dev) {
@@ -241,11 +293,19 @@ static us122l_t *start_stream(unsigned rate)
     return dev;
 }
 
-static void stop_stream(us122l_t **dev, const char *why)
+static void set_dev(us122l_t *d)
 {
+    pthread_mutex_lock(&dev_mx);
+    dev = d;
+    pthread_mutex_unlock(&dev_mx);
+}
+
+static void stop(const char *why)
+{
+    us122l_t *d = dev;
     atomic_store(&S->running, 0);
-    us122l_close(*dev);
-    *dev = NULL;
+    set_dev(NULL);
+    us122l_close(d);
     logf_("stopped (%s)", why);
 }
 
@@ -295,44 +355,53 @@ int main(int argc, char **argv)
     pthread_create(&server, NULL, serve, &port);
     logf_("ready (driver %s)", us122l_version());
 
-    us122l_t *dev = NULL;
+    pthread_t pump;
+    pthread_create(&pump, NULL, midi_pump, NULL);
+
     double last_client = -1e9, retry_at = 0, last_presence = -1e9;
     while (!quit) {
         double now = now_s();
-        int want = atomic_load(&S->io_clients) > 0;
-        if (want)
+        if (atomic_load(&S->io_clients) > 0)
             last_client = now;
-        int keep = want || now - last_client < LINGER_S;
+        double midi_out_age = (mach_absolute_time() - atomic_load(&last_midi_out)) / ticks_per_sec;
+        int need = now - last_client < LINGER_S || atomic_load(&S->midi_clients) > 0 ||
+                   midi_out_age < MIDI_OUT_LINGER_S;
 
-        if (!dev) {
-            if (now - last_presence >= (keep ? 0.25 : 1.0)) {
-                atomic_store(&S->present, unit_present());
-                last_presence = now;
-            }
-            if (keep && atomic_load(&S->present) && now >= retry_at) {
-                dev = start_stream(atomic_load(&S->want_rate));
-                if (!dev)
-                    retry_at = now + RETRY_S;
-            }
-        } else {
+        if (dev) {
             us122l_stats_t s;
             us122l_get_stats(dev, &s);
+            atomic_store(&S->midi_sent, s.midi_out_bytes);
+            atomic_store(&S->midi_received, s.midi_in_bytes);
+            atomic_store(&S->midi_errors, s.midi_errors);
             double since = (mach_absolute_time() - atomic_load(&st.last_capture)) / ticks_per_sec;
-            if (!keep) {
-                stop_stream(&dev, "no more clients");
+            if (!need) {
+                stop("no more clients");
             } else if (atomic_load(&S->want_rate) != st.rate) {
-                stop_stream(&dev, "sample rate change");
+                stop("sample rate change");
             } else if (!s.running || since > STALL_S) {
-                stop_stream(&dev, s.running ? "no audio from the unit" : "unit gone");
+                stop(s.running ? "no audio from the unit" : "unit gone");
                 atomic_store(&S->present, unit_present());
                 last_presence = now;
                 retry_at = now + 0.5;
             }
         }
+        if (!dev) {
+            if (now - last_presence >= (need ? 0.25 : 1.0)) {
+                atomic_store(&S->present, unit_present());
+                last_presence = now;
+            }
+            if (need && atomic_load(&S->present) && now >= retry_at) {
+                us122l_t *d = start_stream(atomic_load(&S->want_rate));
+                if (d)
+                    set_dev(d);
+                else
+                    retry_at = now + RETRY_S;
+            }
+        }
         usleep(20000);
     }
     if (dev)
-        stop_stream(&dev, "daemon exiting");
+        stop("daemon exiting");
     atomic_store(&S->present, 0);
     atomic_store(&S->daemon_pid, 0);
     return 0;

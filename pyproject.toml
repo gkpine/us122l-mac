@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "us122l"
-version = "0.2.0"
+version = "0.4.0"
 description = "Userspace macOS driver for the TASCAM US-122L USB audio interface"
 readme = "README.md"
 license = "GPL-2.0-or-later"

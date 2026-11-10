@@ -6,6 +6,8 @@ if [ "$(id -u)" != 0 ]; then
 fi
 launchctl bootout system/org.us122l-mac.daemon 2>/dev/null || true
 rm -f /Library/LaunchDaemons/org.us122l-mac.daemon.plist
-rm -rf "/Library/Application Support/us122l-mac" /Library/Audio/Plug-Ins/HAL/US122L.driver
+rm -rf "/Library/Application Support/us122l-mac" /Library/Audio/Plug-Ins/HAL/US122L.driver \
+    "/Library/Audio/MIDI Drivers/US122L-MIDI.plugin"
 killall coreaudiod 2>/dev/null || true
-echo "Removed the US-122L Core Audio driver."
+killall MIDIServer 2>/dev/null || true
+echo "Removed the US-122L Core Audio and MIDI drivers."

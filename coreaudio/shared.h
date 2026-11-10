@@ -19,9 +19,18 @@
 
 #define US122L_SERVICE "org.us122l-mac.daemon"
 #define US122L_SHM_MAGIC 0x55533132u   /* "US12" */
-#define US122L_SHM_VERSION 1u
+#define US122L_SHM_VERSION 2u
 #define US122L_RING 32768u              /* frames per ring (power of 2) */
 #define US122L_DEFAULT_RATE 48000u
+#define US122L_MIDI_EVENTS 1024u        /* MIDI IN events (power of 2) */
+#define US122L_MIDI_OUT 16384u          /* MIDI OUT bytes (power of 2) */
+
+/* bytes from one MIDI IN packet, with their arrival time */
+typedef struct {
+    uint64_t host;                      /* mach_absolute_time() */
+    uint32_t len;
+    uint8_t data[8];
+} us122l_midi_event_t;
 
 typedef struct {
     uint32_t magic, version;
@@ -45,6 +54,18 @@ typedef struct {
     /* plug-in -> daemon */
     _Atomic uint32_t want_rate;     /* rate to run at */
     _Atomic uint32_t io_clients;    /* > 0: keep streaming */
+    _Atomic uint32_t midi_clients;  /* > 0: an app listens to MIDI IN: keep streaming */
+    _Atomic uint32_t midi_loopback; /* testing: echo MIDI OUT back as MIDI IN */
+    _Atomic uint64_t midi_sent;     /* daemon -> plug-in: bytes the unit accepted */
+    _Atomic uint64_t midi_received; /*   bytes from MIDI IN */
+    _Atomic uint32_t midi_errors;
+
+    /* MIDI IN: daemon writes events, the MIDI driver reads them */
+    _Atomic uint32_t midi_in_w, midi_in_r;
+    us122l_midi_event_t midi_in[US122L_MIDI_EVENTS];
+    /* MIDI OUT: the MIDI driver writes bytes, the daemon sends them */
+    _Atomic uint32_t midi_out_w, midi_out_r;
+    uint8_t midi_out[US122L_MIDI_OUT];
 
     float in_ring[US122L_RING * 2];  /* capture, indexed by device frame */
     float out_ring[US122L_RING * 2]; /* playback, indexed by device frame */

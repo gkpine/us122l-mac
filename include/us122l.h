@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-#define US122L_VERSION "0.3.0"
+#define US122L_VERSION "0.4.0"
 
 typedef struct us122l us122l_t;
 
@@ -51,6 +51,9 @@ typedef struct {
     int running;              /* 0 once the unit was unplugged or failed */
     int stalled;              /* 1 if it stopped because no audio came for 0.5 s
                                  (e.g. the Mac slept): close and reopen */
+    uint64_t midi_in_bytes;   /* MIDI bytes received from MIDI IN */
+    uint64_t midi_out_bytes;  /* MIDI bytes the unit accepted for MIDI OUT */
+    unsigned midi_errors;     /* MIDI transfers that failed */
 } us122l_stats_t;
 
 /* 1 if a US-122L is plugged in, else 0. */
@@ -75,10 +78,17 @@ typedef struct {
     void (*capture)(const float *in, unsigned frames, uint64_t first_frame,
                     uint64_t host_time, void *user);
     void (*playback)(float *out, unsigned frames, uint64_t first_frame, void *user);
+    /* MIDI bytes from the unit's MIDI IN (optional; on the USB thread). The
+     * unit only passes MIDI (both ways) while its audio is streaming. */
+    void (*midi_in)(const uint8_t *data, unsigned len, uint64_t host_time, void *user);
 } us122l_raw_callbacks;
 
 us122l_t *us122l_open_raw(unsigned rate, const us122l_raw_callbacks *cbs, void *user,
                           char *err, size_t errlen);
+
+/* Queue MIDI bytes for the unit's MIDI OUT (any thread; raw mode). Returns
+ * how many were queued (fewer if the queue is full). */
+unsigned us122l_midi_send(us122l_t *dev, const uint8_t *data, unsigned len);
 
 /* Estimated latency of the USB path itself, in frames: how old capture data
  * is when it arrives, and how far ahead playback data is queued. */

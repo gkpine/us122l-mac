@@ -44,6 +44,12 @@ static const uint16_t PIDS[] = {0x800e, 0x8021};
 #define ALT 1
 #define EP_IN 0x81
 #define EP_OUT 0x02
+#define EP_MIDI_IN 0x83
+#define EP_MIDI_OUT 0x04
+#define MIDI_PKT 9              /* MIDI packets: 8 data bytes (in) or 1 (out), 0xFD padding */
+#define MIDI_NIN 4
+#define MIDI_NOUT 8
+#define MIDI_QUEUE 8192         /* bytes waiting for MIDI OUT (power of 2) */
 #define FRAME 6                 /* bytes per frame: 2 ch x 24 bit */
 #define MAXPKT 78               /* wMaxPacketSize of both iso endpoints */
 #define MAX_FRAMES_PKT (MAXPKT / FRAME)
@@ -170,6 +176,11 @@ struct us122l {
     int raw;                    /* low-level mode (us122l_open_raw) */
     us122l_raw_callbacks rcb;
     float *rawbuf;              /* one transfer of frames, for raw mode */
+    struct libusb_transfer *min[MIDI_NIN], *mout[MIDI_NOUT];
+    int mout_busy[MIDI_NOUT];
+    pthread_mutex_t midi_mx;
+    uint8_t mq[MIDI_QUEUE];     /* MIDI OUT queue (midi_mx) */
+    uint32_t mq_r, mq_w;
     uint64_t raw_out_frame;     /* playback frames handed out (raw mode) */
 
     int npkt, nin, nout;
@@ -197,6 +208,8 @@ struct us122l {
     _Atomic uint32_t in_overflows, out_underflows, usb_errors;
     _Atomic uint64_t frames_in, frames_out;
     _Atomic uint64_t last_cb_ns, last_data_ns;
+    _Atomic uint64_t midi_in_bytes, midi_out_bytes;
+    _Atomic uint32_t midi_errors;
 };
 
 static uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
@@ -476,6 +489,83 @@ static void LIBUSB_CALL out_done(struct libusb_transfer *t)
     resubmit(d, t);
 }
 
+/* ---------------------------------------------------------------- MIDI */
+
+/* Send queued bytes, one per packet, on free MIDI OUT transfers (midi_mx held). */
+static void midi_kick(struct us122l *d)
+{
+    for (int i = 0; i < MIDI_NOUT && d->mq_r != d->mq_w; i++) {
+        if (d->mout_busy[i] || atomic_load(&d->stopping) || atomic_load(&d->dead))
+            continue;
+        struct libusb_transfer *t = d->mout[i];
+        memset(t->buffer, 0xFD, MIDI_PKT);
+        t->buffer[0] = d->mq[d->mq_r & (MIDI_QUEUE - 1)];
+        t->length = MIDI_PKT;
+        d->mout_busy[i] = 1;
+        atomic_fetch_add(&d->active, 1);
+        if (libusb_submit_transfer(t) != 0) {
+            d->mout_busy[i] = 0;
+            atomic_fetch_sub(&d->active, 1);
+            break;
+        }
+        d->mq_r++;
+    }
+}
+
+static void LIBUSB_CALL midi_out_done(struct libusb_transfer *t)
+{
+    struct us122l *d = t->user_data;
+    if (t->status == LIBUSB_TRANSFER_NO_DEVICE)
+        atomic_store(&d->dead, 1);
+    if (t->status == LIBUSB_TRANSFER_COMPLETED)
+        atomic_fetch_add(&d->midi_out_bytes, 1);
+    else if (t->status != LIBUSB_TRANSFER_CANCELLED)
+        atomic_fetch_add(&d->midi_errors, 1);
+    pthread_mutex_lock(&d->midi_mx);
+    for (int i = 0; i < MIDI_NOUT; i++)
+        if (d->mout[i] == t)
+            d->mout_busy[i] = 0;
+    atomic_fetch_sub(&d->active, 1);
+    midi_kick(d);
+    pthread_mutex_unlock(&d->midi_mx);
+}
+
+static void LIBUSB_CALL midi_in_done(struct libusb_transfer *t)
+{
+    struct us122l *d = t->user_data;
+    if (t->status == LIBUSB_TRANSFER_NO_DEVICE) {
+        atomic_store(&d->dead, 1);
+        wake(d);
+    }
+    if (t->status == LIBUSB_TRANSFER_COMPLETED && t->actual_length == MIDI_PKT &&
+        d->rcb.midi_in) {
+        unsigned n = MIDI_PKT - 1;
+        while (n && t->buffer[n - 1] == 0xFD)
+            n--;
+        if (n) {
+            atomic_fetch_add(&d->midi_in_bytes, n);
+            d->rcb.midi_in(t->buffer, n, mach_absolute_time(), d->user);
+        }
+    } else if (t->status != LIBUSB_TRANSFER_COMPLETED && t->status != LIBUSB_TRANSFER_CANCELLED) {
+        atomic_fetch_add(&d->midi_errors, 1);
+    }
+    if (atomic_load(&d->stopping) || atomic_load(&d->dead) || libusb_submit_transfer(t) != 0)
+        atomic_fetch_sub(&d->active, 1);
+}
+
+unsigned us122l_midi_send(us122l_t *d, const uint8_t *data, unsigned len)
+{
+    if (!d || !d->raw)
+        return 0;
+    pthread_mutex_lock(&d->midi_mx);
+    unsigned n = 0;
+    while (n < len && d->mq_w - d->mq_r < MIDI_QUEUE)
+        d->mq[d->mq_w++ & (MIDI_QUEUE - 1)] = data[n++];
+    midi_kick(d);
+    pthread_mutex_unlock(&d->midi_mx);
+    return n;
+}
+
 static void *event_main(void *arg)
 {
     struct us122l *d = arg;
@@ -614,6 +704,17 @@ static void release(struct us122l *d)
             free(d->in[i]->buffer);
             libusb_free_transfer(d->in[i]);
         }
+    for (int i = 0; i < MIDI_NIN; i++)
+        if (d->min[i]) {
+            free(d->min[i]->buffer);
+            libusb_free_transfer(d->min[i]);
+        }
+    for (int i = 0; i < MIDI_NOUT; i++)
+        if (d->mout[i]) {
+            free(d->mout[i]->buffer);
+            libusb_free_transfer(d->mout[i]);
+        }
+    pthread_mutex_destroy(&d->midi_mx);
     for (int i = 0; i < d->nout; i++)
         if (d->out[i]) {
             free(d->out[i]->buffer);
@@ -665,6 +766,14 @@ void us122l_close(us122l_t *d)
     for (int i = 0; i < d->nout; i++)
         if (d->out[i])
             libusb_cancel_transfer(d->out[i]);
+    for (int i = 0; i < MIDI_NIN; i++)
+        if (d->min[i])
+            libusb_cancel_transfer(d->min[i]);
+    pthread_mutex_lock(&d->midi_mx);
+    for (int i = 0; i < MIDI_NOUT; i++)
+        if (d->mout[i] && d->mout_busy[i])
+            libusb_cancel_transfer(d->mout[i]);
+    pthread_mutex_unlock(&d->midi_mx);
     for (int ms = 0; atomic_load(&d->active) > 0 && ms < 2000; ms++) {
         if (!d->ev_started)
             libusb_handle_events_timeout_completed(d->ctx, &(struct timeval){0, 1000}, NULL);
@@ -744,6 +853,7 @@ static us122l_t *open_common(unsigned rate, unsigned block, us122l_callback cb,
     }
     pthread_mutex_init(&d->mx, NULL);
     pthread_cond_init(&d->cv, NULL);
+    pthread_mutex_init(&d->midi_mx, NULL);
     d->rate = rate;
     d->block = block;
     d->cb = cb;
@@ -825,6 +935,26 @@ static us122l_t *open_common(unsigned rate, unsigned block, us122l_callback cb,
         return NULL;
     }
 
+    if (d->raw) {
+        for (int i = 0; i < MIDI_NIN + MIDI_NOUT; i++) {
+            struct libusb_transfer *t = libusb_alloc_transfer(0);
+            uint8_t *buf = calloc(1, 64);
+            if (!t || !buf) {
+                free(buf);
+                libusb_free_transfer(t);
+                seterr(err, errlen, "out of memory%s", NULL);
+                release(d);
+                return NULL;
+            }
+            if (i < MIDI_NIN) {
+                libusb_fill_bulk_transfer(t, d->h, EP_MIDI_IN, buf, MIDI_PKT, midi_in_done, d, 0);
+                d->min[i] = t;
+            } else {
+                libusb_fill_bulk_transfer(t, d->h, EP_MIDI_OUT, buf, MIDI_PKT, midi_out_done, d, 0);
+                d->mout[i - MIDI_NIN] = t;
+            }
+        }
+    }
     for (int i = 0; i < d->nin; i++) {
         struct libusb_transfer *t = libusb_alloc_transfer(d->npkt);
         uint8_t *buf = calloc(d->npkt, MAXPKT);
@@ -856,6 +986,14 @@ static us122l_t *open_common(unsigned rate, unsigned block, us122l_callback cb,
 
     if (pthread_create(&d->ev_thread, NULL, event_main, d) == 0)
         d->ev_started = 1;
+    r = 0;
+    for (int i = 0; i < MIDI_NIN && d->min[i]; i++) {
+        atomic_fetch_add(&d->active, 1);
+        if (libusb_submit_transfer(d->min[i]) != 0) {
+            atomic_fetch_sub(&d->active, 1);
+            DBG("can't start MIDI input\n");
+        }
+    }
     for (int i = 0; i < d->nin || i < d->nout; i++) {
         if (i < d->nin) {
             atomic_fetch_add(&d->active, 1);
@@ -909,4 +1047,7 @@ void us122l_get_stats(us122l_t *d, us122l_stats_t *s)
     s->usb_errors = atomic_load(&d->usb_errors);
     s->running = !atomic_load(&d->dead) && !atomic_load(&d->stopping);
     s->stalled = atomic_load(&d->stalled);
+    s->midi_in_bytes = atomic_load(&d->midi_in_bytes);
+    s->midi_out_bytes = atomic_load(&d->midi_out_bytes);
+    s->midi_errors = atomic_load(&d->midi_errors);
 }

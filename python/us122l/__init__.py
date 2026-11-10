@@ -110,7 +110,8 @@ class _Stats(ctypes.Structure):
                 ("frames_in", ctypes.c_uint64), ("frames_out", ctypes.c_uint64),
                 ("input_overflows", ctypes.c_uint), ("output_underflows", ctypes.c_uint),
                 ("usb_errors", ctypes.c_uint), ("running", ctypes.c_int),
-                ("stalled", ctypes.c_int)]
+                ("stalled", ctypes.c_int), ("midi_in_bytes", ctypes.c_uint64),
+                ("midi_out_bytes", ctypes.c_uint64), ("midi_errors", ctypes.c_uint)]
 
 
 _lib = _load()

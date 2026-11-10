@@ -16,15 +16,15 @@ what lets [VibeAmp](../VibeAmp) use the US-122L on a Mac.
 
 It comes in two parts:
 
-- **The Core Audio driver**: makes the US-122L an ordinary audio device for
-  every app (GarageBand, Logic, Music, Zoom, Sound settings…). See
+- **The Core Audio and Core MIDI drivers**: make the US-122L an ordinary
+  audio device, and its MIDI IN/OUT ordinary MIDI ports, for every app
+  (GarageBand, Logic, Music, Zoom, Sound settings, Audio MIDI Setup…). See
   [Core Audio driver](#core-audio-driver).
 - **The library** (C and Python): for programs that talk to the unit
   directly, like VibeAmp did before the Core Audio driver.
 
 Not supported (yet):
 
-- **MIDI** in/out.
 - **USB 1.1 (full speed)** connections, e.g. through some hubs or KVMs: it
   says so; plug the unit straight into the Mac.
 - **More than one unit** at once (the first one found is used).
@@ -40,7 +40,8 @@ sudo coreaudio/install.sh       # restarts Core Audio: sound stops for a second
 ```
 
 Then pick **TASCAM US-122L** in System Settings → Sound, or in any app. It
-offers 2 inputs and 2 outputs at 44.1, 48, 88.2 or 96 kHz. Remove it with
+offers 2 inputs and 2 outputs at 44.1, 48, 88.2 or 96 kHz, and a MIDI device
+of the same name with one MIDI input and one output. Remove it all with
 `sudo coreaudio/uninstall.sh`.
 
 How it fits together:
@@ -51,6 +52,15 @@ How it fits together:
   stream if the unit stops (sleep, replug).
 - **`US122L.driver`**, an AudioServerPlugIn, is loaded by macOS's audio
   server. It shows the device while a unit is plugged in.
+- **`US122L-MIDI.plugin`**, a Core MIDI driver, is loaded by MIDIServer.
+  The MIDI device shows as offline when the unit is unplugged.
+- **MIDI on the wire:** 9-byte bulk packets. MIDI IN carries up to 8 bytes
+  padded with `0xFD`; MIDI OUT carries one byte, padded the same way (as in
+  Linux). The unit only passes MIDI while its audio streams: with audio off
+  it took 2 of 18 bytes and then stopped accepting. So the daemon also
+  streams while any app listens to the MIDI input (Core MIDI's
+  `EnableSource`), and for 10 s after anything is sent to MIDI OUT. Bytes
+  wait the ~30 ms it takes to start.
 - They share one block of memory, handed over by Mach (`coreaudio/shared.h`).
   It holds a capture ring and a playback ring, both indexed by the unit's
   frame count, and the unit's clock. The daemon fits that clock from packet
@@ -59,8 +69,18 @@ How it fits together:
 - Latency: Core Audio's usual buffer, plus a safety offset of one USB
   transfer and 2 ms each way, plus 2 ms in and 6 ms out on the bus.
 
-Logs: `/Library/Logs/us122ld.log`. `build/us122l-shmtest` acts like the
-plug-in, to check the daemon without Core Audio (run it outside any sandbox).
+Logs: `/Library/Logs/us122ld.log`. Test tools (run them outside any sandbox):
+
+- `build/us122l-shmtest` acts like the audio plug-in, to check the daemon
+  without Core Audio.
+- `build/us122l-miditest` acts like a MIDI app. It turns on the daemon's
+  loopback switch (MIDI OUT echoed back as MIDI IN, after the unit accepted
+  it over USB) and checks every byte comes back. Measured: 120/120 bytes,
+  worst round trip 2.5 ms.
+- `build/us122l-midi` (with the daemon idle) prints what reaches the unit's
+  MIDI IN and sends a note to MIDI OUT every 2 s. Use it with a keyboard or
+  synth attached; the MIDI sockets themselves haven't been tested with gear
+  yet.
 
 ## Install the library
 
