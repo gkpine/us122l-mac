@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "us122l"
+version = "0.1.0"
+description = "Userspace macOS driver for the TASCAM US-122L USB audio interface"
+readme = "README.md"
+license = "GPL-2.0-or-later"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+packages = ["us122l"]
