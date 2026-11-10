@@ -31,8 +31,9 @@ If you try it, please share how it goes.
 - **Your Mac's volume slider and volume keys** don't control the US-122L. Use
   the knobs on the unit instead.
 - **More than one US-122L** connected at the same time.
-- **Some USB hubs and adapters.** If the unit isn't found, plug it straight
-  into your Mac.
+- **Some USB hubs and adapters.** A standard USB-C to USB adapter works fine
+  (that's how it was tested). If the unit isn't found through a hub, plug it
+  straight into your Mac, or through a simple adapter like that.
 - **Other TASCAM models.** The US-122MKII will probably work but hasn't been
   tested. The original US-122 (without the "L") and the US-144 aren't
   supported.
